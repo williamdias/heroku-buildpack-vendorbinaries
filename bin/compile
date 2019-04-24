@@ -7,18 +7,33 @@ indent() {
 
 echo "-----> Found a .vendor_urls file"
 
+BUILD_DIR=$1
+CACHE_DIR=$2
+LP_DIR=`cd $(dirname $0); cd ..; pwd`
+
 # Bail early but noisily
-if [ ! -s $1/.vendor_urls ]; then
+if [ ! -s $BUILD_DIR/.vendor_urls ]; then
   echo ".vendor_urls empty. Skipping." | indent
   exit 0
 fi
 
-cd $1
+mkdir -p $BUILD_DIR/.vendors
+cd $BUILD_DIR
 
 while read url; do
   if [ -n "$url" ]; then # incase ensure_newline_at_eof_on_save is enabled
     echo Vendoring $url | indent
 
+    # download file if not present in cache directory
+    filename="${url##*/}"
+    if [ ! -s $CACHE_DIR/$filename ]; then
+      echo "Downlowding file to $CACHE_DIR$filename" | indent
+      curl -L --silent -o "$CACHE_DIR/$filename" $url
+    else
+      echo "Using cache file $CACHE_DIR$filename" | indent
+    fi
+
+    # check file extension
     extension="${url##*.}" # http://stackoverflow.com/q/965053
     flag="-z" # by default use gz
     if [ "$extension" == "xz" ]; then flag="--xz"
@@ -26,6 +41,35 @@ while read url; do
     elif [ "$extension" == "tar" ]; then flag=""  # no compression
     fi
 
-    curl -L --silent $url | tar x $flag
+    # decompress
+    tar x $flag -f $CACHE_DIR/$filename -C $BUILD_DIR/.vendors
+
   fi
 done < .vendor_urls
+
+echo "Writing profile script" | indent
+mkdir -p $BUILD_DIR/.profile.d
+cat <<EOF >$BUILD_DIR/.profile.d/000_vendors.sh
+export PATH="\$HOME/.vendors/bin:\$PATH"
+export LD_LIBRARY_PATH="\$HOME/.vendors/lib:\$LD_LIBRARY_PATH"
+export LIBRARY_PATH="\$HOME/.vendors/lib:\$LIBRARY_PATH"
+export INCLUDE_PATH="\$HOME/.vendors/include:\$INCLUDE_PATH"
+export CPATH="\$INCLUDE_PATH"
+export CPPPATH="\$INCLUDE_PATH"
+export PKG_CONFIG_PATH="\$HOME/.vendors/lib/pkgconfig:\$PKG_CONFIG_PATH"
+EOF
+
+export PATH="$BUILD_DIR/.vendors/bin:$PATH"
+export LD_LIBRARY_PATH="$BUILD_DIR/.vendors/lib:$LD_LIBRARY_PATH"
+export LIBRARY_PATH="$BUILD_DIR/.vendors/lib:$LIBRARY_PATH"
+export INCLUDE_PATH="$BUILD_DIR/.vendors/include:$INCLUDE_PATH"
+export CPATH="$INCLUDE_PATH"
+export CPPPATH="$INCLUDE_PATH"
+export PKG_CONFIG_PATH="$BUILD_DIR/.vendors/lib/pkgconfig:$PKG_CONFIG_PATH"
+
+# give environment to later buildpacks
+export | grep -E -e ' (PATH|LD_LIBRARY_PATH|LIBRARY_PATH|INCLUDE_PATH|CPATH|CPPPATH|PKG_CONFIG_PATH)='  > "$LP_DIR/export"
+
+echo "Rewrite package-config files" | indent
+#find $BUILD_DIR/.vendors -type f -ipath '*/pkgconfig/*.pc' | xargs --no-run-if-empty -n 1 sed -i -e 's!^prefix=\(.*\)$!prefix='"$BUILD_DIR"'/.vendors\1!g'
+find $BUILD_DIR/.vendors -type f -ipath '*/pkgconfig/*.pc' | xargs --no-run-if-empty -n 1 sed -i -e 's!^prefix=\(.*\)$!prefix='"$BUILD_DIR"'/.vendors!g'
